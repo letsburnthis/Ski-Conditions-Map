@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ski Resort Weather Map</title>
+    
+    <!-- Leaflet CSS - Required for map styling -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <style>
+        /* Reset default margins and padding */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Map container takes up full viewport */
+        #map {
+            width: 100%;
+            height: 100vh;
+        }
+
+        /* Custom styling for the popup content */
+        .resort-popup {
+            font-family: Arial, sans-serif;
+            min-width: 200px;
+        }
+
+        .resort-popup h3 {
+            margin: 0 0 10px 0;
+            color: #2c5aa0;
+            font-size: 18px;
+        }
+
+        .resort-popup p {
+            margin: 5px 0;
+            font-size: 14px;
+        }
+
+        .resort-popup .label {
+            font-weight: bold;
+            color: #555;
+        }
+
+        .resort-popup .day-section {
+            margin-top: 15px;
+            padding-top: 10px;
+            border-top: 1px solid #ddd;
+        }
+
+        .resort-popup .day-section:first-of-type {
+            margin-top: 10px;
+            border-top: none;
+        }
+
+        .resort-popup .day-title {
+            font-weight: bold;
+            color: #2c5aa0;
+            margin-bottom: 5px;
+        }
+
+        /* Loading indicator shown while weather data is being fetched */
+        .loading {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: white;
+            padding: 15px 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            z-index: 1000;
+            font-size: 14px;
+        }
+
+        /* Toggle button for current vs weekend view */
+        .view-toggle {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            z-index: 1000;
+            display: flex;
+            gap: 0;
+        }
+
+        .view-toggle button {
+            padding: 10px 20px;
+            border: 2px solid #2c5aa0;
+            background: white;
+            color: #2c5aa0;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .view-toggle button:first-child {
+            border-radius: 5px 0 0 5px;
+        }
+
+        .view-toggle button:last-child {
+            border-radius: 0 5px 5px 0;
+            border-left: none;
+        }
+
+        .view-toggle button.active {
+            background: #2c5aa0;
+            color: white;
+        }
+
+        .view-toggle button:hover:not(.active) {
+            background: #e3f2fd;
+        }
+
+        /* Color legend for ski conditions */
+        .legend {
+            position: absolute;
+            bottom: 30px;
+            right: 20px;
+            background: white;
+            padding: 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            z-index: 1000;
+            font-size: 12px;
+        }
+
+        .legend h4 {
+            margin: 0 0 10px 0;
+            font-size: 14px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin: 5px 0;
+        }
+
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            margin-right: 10px;
+            border: 2px solid #333;
+        }
+
+        .legend-note {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #ddd;
+            font-size: 11px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <!-- Map container where Leaflet will render the interactive map -->
+    <div id="map"></div>
+    
+    <!-- View toggle button -->
+    <div class="view-toggle">
+        <button id="currentBtn" class="active" onclick="switchView('current')">Current Conditions</button>
+        <button id="weekendBtn" onclick="switchView('weekend')">Weekend Forecast</button>
+    </div>
+
+    <!-- Loading indicator (hidden by default via JavaScript) -->
+    <div id="loading" class="loading">Loading weather data...</div>
+
+    <!-- Legend explaining marker colors -->
+    <div class="legend">
+        <h4>Ski Conditions</h4>
+        <div class="legend-item">
+            <div class="legend-color" style="background-color: #4CAF50;"></div>
+            <span>Good (Cold, Snow possible)</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background-color: #FFC107;"></div>
+            <span>Moderate</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background-color: #F44336;"></div>
+            <span>Poor (Warm)</span>
+        </div>
+        <div class="legend-note" id="legendNote">
+            Click markers for details
+        </div>
+    </div>
+
+    <!-- Leaflet JavaScript library - Required for map functionality -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" ></script>
+    
+    <script>
+        // =================================================================
+        // SKI RESORT DATA ARRAY
+        // =================================================================
+        const skiResorts = [
+            {
+                name: "Massanutten Resort",
+                lat: 38.4047, 
+                lng: -78.7547,
+                elevation: 533,//in meters
+                distanceFromDC: "130 miles (2.5 hours)",
+                notes: "Has an indoor water park.",
+                webcamSite: "https://www.massresort.com/play/snow-sports/snow-webcams/"
+
+            },
+            {
+                name: "Whitetail Resort",
+                lat: 39.7426,
+                lng: -77.9336,
+                elevation: 263.7,//in meters
+                distanceFromDC: "93 miles (1.7 hours)",
+                notes:"",
+                webcamSite:"https://www.skiwhitetail.com/the-mountain/mountain-conditions/mountain-cams.aspx"
+            },
+            {
+                name: "Seven Springs",
+                lat: 40.0231,
+                lng: -79.2977,
+                elevation: 683,//in meters
+                distanceFromDC: "200 miles (3 hours)",
+                notes:"",
+                webcamSite:"https://www.7springs.com/the-mountain/mountain-conditions/mountain-cams.aspx"
+            },
+            {
+                name: "Snowshoe Mountain",
+                lat: 38.4032,
+                lng: -79.9938,
+                elevation: 1020,//in meters
+                distanceFromDC: "230 miles (4.3 hours)",
+                notes:"",
+                webcamSite:"https://www.snowshoemtn.com/media-room/web-cams"
+            },
+            {
+                name: "Liberty Mountain",
+                lat: 39.7638,
+                lng: -77.3755,
+                elevation: 170,//in meters
+                distanceFromDC: "82 miles (1.5 hours)",
+                notes:"",
+                webcamSite:"https://www.libertymountainresort.com/the-mountain/mountain-conditions/mountain-cams.aspx"
+            },
+             {
+                name: "Wisp Resort",
+                lat: 39.5570,
+                lng: -79.3635,
+                elevation: 736,//in meters
+                distanceFromDC: "183 miles (3.1 hours)",
+                notes:"",
+                webcamSite:"https://www.wispresort.com/mountain-report-cams/"
+            }
+        ];
+
+        // =================================================================
+        // GLOBAL VARIABLES
+        // =================================================================
+        let map;
+        let markers = [];
+        let currentWeatherData = {};
+        let weekendWeatherData = {};
+        let currentView = 'current';
+        let openPopupResortName = null; // Track which popup is open
+
+        // =================================================================
+        // MAP INITIALIZATION
+        // =================================================================
+        map = L.map('map');
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors',
+            maxZoom: 19
+        }).addTo(map);
+
+        // =================================================================
+        // WEATHER CONDITION EVALUATION 
+        // =================================================================
+        function evaluateSkiConditions(weather) {
+            const temp = weather.temperature;
+            const windSpeed = weather.windSpeed;
+            
+            // Using Fahrenheit values:
+            // Good: <= 30°F (freezing) with wind < 20 mph
+            // Poor: > 34°F (too warm)
+            // Moderate: everything else
+            if (temp <= 30 && windSpeed < 20) {
+                return 'good';
+            }
+            else if (temp > 34) {
+                return 'poor';
+            }
+            else {
+                return 'moderate';
+            }
+        }
+
+        // =================================================================
+        // MARKER COLOR MAPPING
+        // =================================================================
+        function getMarkerColor(condition) {
+            const colors = {
+                'good': '#4CAF50',
+                'moderate': '#FFC107',
+                'poor': '#F44336'
+            };
+            return colors[condition] || '#999999';
+        }
+
+        // =================================================================
+        // DATE CALCULATION HELPERS
+        // =================================================================
+        function getNextSaturday() {
+            const now = new Date();
+            const dayOfWeek = now.getDay();
+            const daysUntilSaturday = (6 - dayOfWeek + 7) % 7 || 7;
+            const saturday = new Date(now.getTime() + daysUntilSaturday * 24 * 60 * 60 * 1000);
+            return saturday.toISOString().split('T')[0];
+        }
+
+        function getNextSunday() {
+            const now = new Date();
+            const dayOfWeek = now.getDay();
+            const daysUntilSunday = (7 - dayOfWeek + 7) % 7 || 7;
+            const sunday = new Date(now.getTime() + daysUntilSunday * 24 * 60 * 60 * 1000);
+            return sunday.toISOString().split('T')[0];
+        }
+
+        // =================================================================
+        // WEATHER DATA FETCHING - CURRENT
+        // =================================================================
+        async function fetchCurrentWeather(lat, lng, elevation) {
+            const now = new Date();
+            const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+            
+            const startDate = yesterday.toISOString().split('T')[0];
+            const endDate = now.toISOString().split('T')[0];
+            
+            const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,weathercode,windspeed_10m,snowfall&hourly=snowfall&start_date=${startDate}&end_date=${endDate}&elevation=${elevation}&temperature_unit=fahrenheit&windspeed_unit=mph&precipitation_unit=inch`;
+            
+            try {
+                const response = await fetch(url);
+                const data = await response.json();
+                
+                let last24hSnow = 0;
+                if (data.hourly && data.hourly.snowfall) {
+                    const recentSnowfall = data.hourly.snowfall.slice(-24);
+                    last24hSnow = recentSnowfall.reduce((sum, value) => sum + (value || 0), 0);
+                }
+                
+                return {
+                    temperature: data.current.temperature_2m,
+                    weatherCode: data.current.weathercode,
+                    windSpeed: data.current.windspeed_10m,
+                    snowfall: data.current.snowfall || 0,
+                    snowfall24h: last24hSnow.toFixed(1),
+                };
+            } catch (error) {
+                console.error('Error fetching current weather:', error);
+                return null;
+            }
+        }
+
+        // =================================================================
+        // WEATHER DATA FETCHING - WEEKEND FORECAST
+        // =================================================================
+        async function fetchWeekendForecast(lat, lng, elevation) {
+            const saturday = getNextSaturday();
+            const sunday = getNextSunday();
+            
+            const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max,temperature_2m_min,weathercode,windspeed_10m_max,snowfall_sum&start_date=${saturday}&end_date=${sunday}&elevation=${elevation}&temperature_unit=fahrenheit&windspeed_unit=mph&precipitation_unit=inch`;
+            
+            try {
+                const response = await fetch(url);
+                const data = await response.json();
+                
+                if (!data.daily) return null;
+                
+                return {
+                    saturday: {
+                        temperature: (data.daily.temperature_2m_max[0] + data.daily.temperature_2m_min[0]) / 2,
+                        tempMax: data.daily.temperature_2m_max[0],
+                        tempMin: data.daily.temperature_2m_min[0],
+                        weatherCode: data.daily.weathercode[0],
+                        windSpeed: data.daily.windspeed_10m_max[0],
+                        snowfall: data.daily.snowfall_sum[0] || 0,
+                    },
+                    sunday: {
+                        temperature: (data.daily.temperature_2m_max[1] + data.daily.temperature_2m_min[1]) / 2,
+                        tempMax: data.daily.temperature_2m_max[1],
+                        tempMin: data.daily.temperature_2m_min[1],
+                        weatherCode: data.daily.weathercode[1],
+                        windSpeed: data.daily.windspeed_10m_max[1],
+                        snowfall: data.daily.snowfall_sum[1] || 0,
+                    }
+                };
+            } catch (error) {
+                console.error('Error fetching weekend forecast:', error);
+                return null;
+            }
+        }
+
+        // =================================================================
+        // WEATHER CODE INTERPRETATION
+        // =================================================================
+        function getWeatherDescription(code) {
+            const weatherCodes = {
+                0: 'Clear sky',
+                1: 'Mainly clear',
+                2: 'Partly cloudy',
+                3: 'Overcast',
+                45: 'Foggy',
+                48: 'Depositing rime fog',
+                51: 'Light drizzle',
+                53: 'Moderate drizzle',
+                55: 'Dense drizzle',
+                61: 'Slight rain',
+                63: 'Moderate rain',
+                65: 'Heavy rain',
+                71: 'Slight snow',
+                73: 'Moderate snow',
+                75: 'Heavy snow',
+                77: 'Snow grains',
+                80: 'Slight rain showers',
+                81: 'Moderate rain showers',
+                82: 'Violent rain showers',
+                85: 'Slight snow showers',
+                86: 'Heavy snow showers',
+                95: 'Thunderstorm',
+                96: 'Thunderstorm with slight hail',
+                99: 'Thunderstorm with heavy hail'
+            };
+            return weatherCodes[code] || 'Unknown';
+        }
+
+        // =================================================================
+        // POPUP CONTENT CREATION
+        // =================================================================
+        function createCurrentPopupContent(resort, weather) {
+            if (!weather) {
+                return `
+                    <div class="resort-popup">
+                        <h3>${resort.name}</h3>
+                        <p><span class="label">Distance from DC:</span> ${resort.distanceFromDC}</p>
+                        <p>Weather data unavailable</p>
+                    </div>
+                `;
+            }
+
+            return `
+                <div class="resort-popup">
+                    <h3>${resort.name}</h3>
+                    <p><span class="label">Distance from DC:</span> ${resort.distanceFromDC}</p>
+                    <p><span class="label">Temperature:</span> ${weather.temperature}°F</p>
+                    <p><span class="label">Conditions:</span> ${getWeatherDescription(weather.weatherCode)}</p>
+                    <p><span class="label">Wind Speed:</span> ${weather.windSpeed} mph</p>
+                    <p><span class="label">Snowfall (24h):</span> ${weather.snowfall24h} inches</p>
+                    <p><span class="label">Notes:</span> ${resort.notes}</p>
+                    <a href="${resort.webcamSite}" target="_blank" rel="noopener noreferrer">Mountain Cams</a>
+                </div>
+            `;
+        }
+
+        function createWeekendPopupContent(resort, weather) {
+            if (!weather) {
+                return `
+                    <div class="resort-popup">
+                        <h3>${resort.name}</h3>
+                        <p><span class="label">Distance from DC:</span> ${resort.distanceFromDC}</p>
+                        <p>Weekend forecast unavailable</p>
+                        
+                    </div>
+                `;
+            }
+
+            return `
+                <div class="resort-popup">
+                    <h3>${resort.name}</h3>
+                    <p><span class="label">Distance from DC:</span> ${resort.distanceFromDC}</p>
+                    <p><span class="label">Notes:</span> ${resort.notes}</p>
+                    <a href="${resort.webcamSite}" target="_blank" rel="noopener noreferrer">Mountain Cams</a>
+                    
+                    <div class="day-section">
+                        <div class="day-title">Saturday</div>
+                        <p><span class="label">Temperature:</span> ${weather.saturday.tempMin}°F - ${weather.saturday.tempMax}°F</p>
+                        <p><span class="label">Conditions:</span> ${getWeatherDescription(weather.saturday.weatherCode)}</p>
+                        <p><span class="label">Wind Speed:</span> ${weather.saturday.windSpeed} mph</p>
+                        <p><span class="label">Expected Snowfall:</span> ${weather.saturday.snowfall.toFixed(1)} inches</p>
+                    </div>
+                    
+                    <div class="day-section">
+                        <div class="day-title">Sunday</div>
+                        <p><span class="label">Temperature:</span> ${weather.sunday.tempMin}°F - ${weather.sunday.tempMax}°F</p>
+                        <p><span class="label">Conditions:</span> ${getWeatherDescription(weather.sunday.weatherCode)}</p>
+                        <p><span class="label">Wind Speed:</span> ${weather.sunday.windSpeed} mph</p>
+                        <p><span class="label">Expected Snowfall:</span> ${weather.sunday.snowfall.toFixed(1)} inches</p>
+                    </div>
+                </div>
+            `;
+        }
+
+        // =================================================================
+        // SPLIT MARKER CREATION (SVG-based for weekend view)
+        // =================================================================
+        function createSplitMarker(resort, weather) {
+            if (!weather) {
+                return createRegularMarker(resort, null);
+            }
+
+            // CORRECTED: Use high temperature (tempMax) for condition evaluation
+            const satCondition = evaluateSkiConditions({ 
+                temperature: weather.saturday.tempMax, 
+                windSpeed: weather.saturday.windSpeed 
+            });
+            const sunCondition = evaluateSkiConditions({ 
+                temperature: weather.sunday.tempMax, 
+                windSpeed: weather.sunday.windSpeed 
+            });
+            const satColor = getMarkerColor(satCondition);
+            const sunColor = getMarkerColor(sunCondition);
+
+            // Create custom SVG icon with split colors
+            const svgIcon = L.divIcon({
+                html: `
+                    <svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <circle cx="12" cy="12" r="10" fill="${satColor}" stroke="#333" stroke-width="2"/>
+                        <path d="M 12 2 A 10 10 0 0 1 12 22 Z" fill="${sunColor}"/>
+                        <circle cx="12" cy="12" r="10" fill="none" stroke="#333" stroke-width="2"/>
+                    </svg>
+                `,
+                className: 'split-marker',
+                iconSize: [24, 24],
+                iconAnchor: [12, 12],
+                popupAnchor: [0, -12]
+            });
+
+            const marker = L.marker([resort.lat, resort.lng], {
+                icon: svgIcon
+            }).addTo(map);
+
+            marker.bindPopup(createWeekendPopupContent(resort, weather));
+            
+            // Store resort name on the marker for easy lookup
+            marker.resortName = resort.name;
+            
+            return marker;
+        }
+
+        // =================================================================
+        // REGULAR MARKER CREATION (for current view)
+        // =================================================================
+        function createRegularMarker(resort, weather) {
+            const condition = weather ? evaluateSkiConditions(weather) : 'moderate';
+            const color = getMarkerColor(condition);
+            
+            const marker = L.circleMarker([resort.lat, resort.lng], {
+                radius: 10,
+                fillColor: color,
+                color: '#333',
+                weight: 2,
+                opacity: 1,
+                fillOpacity: 0.8
+            }).addTo(map);
+
+            marker.bindPopup(createCurrentPopupContent(resort, weather));
+            
+            // Store resort name on the marker for easy lookup
+            marker.resortName = resort.name;
+            
+            return marker;
+        }
+
+        // =================================================================
+        // VIEW SWITCHING
+        // =================================================================
+        function switchView(view) {
+            // Check which popup is open before doing anything
+            let resortToReopen = null;
+            markers.forEach(marker => {
+                if (marker.isPopupOpen()) {
+                    resortToReopen = marker.resortName;
+                }
+            });
+            
+            currentView = view;
+            
+            // Update button states
+            document.getElementById('currentBtn').classList.toggle('active', view === 'current');
+            document.getElementById('weekendBtn').classList.toggle('active', view === 'weekend');
+            
+            // Update legend note
+            const legendNote = document.getElementById('legendNote');
+            if (view === 'weekend') {
+                legendNote.innerHTML = 'Left: Saturday | Right: Sunday';
+            } else {
+                legendNote.innerHTML = 'Click markers for details';
+            }
+            
+            // Clear existing markers
+            markers.forEach(marker => map.removeLayer(marker));
+            markers = [];
+            
+            // Create new markers based on view
+            skiResorts.forEach(resort => {
+                let marker;
+                if (view === 'current') {
+                    marker = createRegularMarker(resort, currentWeatherData[resort.name]);
+                } else {
+                    marker = createSplitMarker(resort, weekendWeatherData[resort.name]);
+                }
+                markers.push(marker);
+                
+                // Re-open the popup if it was open for this resort
+                if (resortToReopen === resort.name) {
+                    // Use requestAnimationFrame to ensure DOM is updated
+                    requestAnimationFrame(() => {
+                        marker.openPopup();
+                    });
+                }
+            });
+        }
+
+        // =================================================================
+        // MAIN INITIALIZATION FUNCTION
+        // =================================================================
+        async function initializeMap() {
+            document.getElementById('loading').style.display = 'block';
+
+            // Fetch both current and weekend data
+            const currentPromises = skiResorts.map(resort => 
+                fetchCurrentWeather(resort.lat, resort.lng, resort.elevation)
+            );
+            
+            const weekendPromises = skiResorts.map(resort => 
+                fetchWeekendForecast(resort.lat, resort.lng, resort.elevation)
+            );
+
+            const [currentResults, weekendResults] = await Promise.all([
+                Promise.all(currentPromises),
+                Promise.all(weekendPromises)
+            ]);
+
+            // Store all weather data
+            skiResorts.forEach((resort, index) => {
+                currentWeatherData[resort.name] = currentResults[index];
+                weekendWeatherData[resort.name] = weekendResults[index];
+            });
+
+            // Create initial markers (current view)
+            skiResorts.forEach(resort => {
+                const marker = createRegularMarker(resort, currentWeatherData[resort.name]);
+                markers.push(marker);
+            });
+
+            document.getElementById('loading').style.display = 'none';
+
+            // Auto-zoom map to fit all markers
+            if (markers.length > 0) {
+                const group = L.featureGroup(markers);
+                map.fitBounds(group.getBounds(), {
+                    padding: [50, 50]
+                });
+            }
+        }
+
+        // =================================================================
+        // START THE APPLICATION
+        // =================================================================
+        initializeMap();
+    </script>
+</body>
+</html>
