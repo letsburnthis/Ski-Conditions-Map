@@ -323,7 +323,16 @@
         function getNextSaturday() {
             const now = new Date();
             const dayOfWeek = now.getDay();
-            const daysUntilSaturday = (6 - dayOfWeek + 7) % 7 || 7;
+            // If today is Saturday (6) or Sunday (0), get next weekend's Saturday
+            // Otherwise get the upcoming Saturday this week
+            let daysUntilSaturday = (6 - dayOfWeek + 7) % 7;
+            if (daysUntilSaturday === 0) {
+                // Today is Saturday, get next Saturday
+                daysUntilSaturday = 7;
+            } else if (dayOfWeek === 0) {
+                // Today is Sunday, get next Saturday (6 days out)
+                daysUntilSaturday = 6;
+            }
             const saturday = new Date(now.getTime() + daysUntilSaturday * 24 * 60 * 60 * 1000);
             return saturday.toISOString().split('T')[0];
         }
@@ -331,7 +340,16 @@
         function getNextSunday() {
             const now = new Date();
             const dayOfWeek = now.getDay();
-            const daysUntilSunday = (7 - dayOfWeek + 7) % 7 || 7;
+            // If today is Saturday (6) or Sunday (0), get next weekend's Sunday
+            // Otherwise get the upcoming Sunday this week
+            let daysUntilSunday = (7 - dayOfWeek) % 7;
+            if (daysUntilSunday === 0) {
+                // Today is Sunday, get next Sunday
+                daysUntilSunday = 7;
+            } else if (dayOfWeek === 6) {
+                // Today is Saturday, get next Sunday (8 days out)
+                daysUntilSunday = 8;
+            }
             const sunday = new Date(now.getTime() + daysUntilSunday * 24 * 60 * 60 * 1000);
             return sunday.toISOString().split('T')[0];
         }
