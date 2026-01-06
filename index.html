@@ -183,15 +183,15 @@
         <h4>Ski Conditions</h4>
         <div class="legend-item">
             <div class="legend-color" style="background-color: #4CAF50;"></div>
-            <span>Good (Cold, Snow possible)</span>
+            <span>Excellent (Fresh snow, cold)</span>
         </div>
         <div class="legend-item">
             <div class="legend-color" style="background-color: #FFC107;"></div>
-            <span>Moderate</span>
+            <span>Moderate (Some snow, cold)</span>
         </div>
         <div class="legend-item">
             <div class="legend-color" style="background-color: #F44336;"></div>
-            <span>Poor (Warm)</span>
+            <span>Poor (No snow or warm/windy)</span>
         </div>
         <div class="legend-note" id="legendNote">
             Click markers for details
@@ -270,6 +270,8 @@
         let markers = [];
         let currentWeatherData = {};
         let weekendWeatherData = {};
+        let unifiedWeatherData = {}; // NEW: Unified timeline data structure
+        let evaluationCache = {}; // NEW: Pre-calculated evaluations for performance
         let currentView = 'current';
         let openPopupResortName = null; // Track which popup is open
 
@@ -284,37 +286,265 @@
         }).addTo(map);
 
         // =================================================================
-        // WEATHER CONDITION EVALUATION 
+        // WEATHER CONDITION EVALUATION (NEW SYSTEM)
         // =================================================================
-        function evaluateSkiConditions(weather) {
-            const temp = weather.temperature;
-            const windSpeed = weather.windSpeed;
-            
-            // Using Fahrenheit values:
-            // Good: <= 30°F (freezing) with wind < 20 mph
-            // Poor: > 34°F (too warm)
-            // Moderate: everything else
-            if (temp <= 30 && windSpeed < 20) {
-                return 'good';
+
+        /**
+         * Evaluates ski conditions for a specific date using lookback logic
+         * @param {Object} weatherTimeline - The resort's full weather timeline
+         * @param {string} targetDate - Date to evaluate (YYYY-MM-DD)
+         * @returns {Object} { color: 'green'|'yellow'|'red', summary: 'explanation text' }
+         */
+        function evaluateSkiConditions(weatherTimeline, targetDate) {
+            const { timeline, dateIndex } = weatherTimeline;
+            const targetIdx = dateIndex[targetDate];
+
+            if (targetIdx === undefined) {
+                return { color: 'red', summary: 'No weather data available' };
             }
-            else if (temp > 34) {
-                return 'poor';
+
+            const targetDay = timeline[targetIdx];
+
+            // STEP 1: Check wind speeds (independent red trigger)
+            const windCheck = checkWindSpeeds(targetDay);
+            if (windCheck.isRed) {
+                return { color: 'red', summary: windCheck.summary };
             }
-            else {
-                return 'moderate';
+
+            // STEP 2: Analyze snowfall and temperature history
+            const lookback2Days = analyzeLookback(timeline, targetIdx, 2);
+            const lookback5Days = analyzeLookback(timeline, targetIdx, 5);
+            const lookback7Days = analyzeLookback(timeline, targetIdx, 7);
+
+            // STEP 3: Apply Green/Yellow/Red criteria
+
+            // GREEN: Snowed in last 2 days AND no thaw in last 2 days
+            if (lookback2Days.hadSnow && !lookback2Days.hadThaw) {
+                return {
+                    color: 'green',
+                    summary: `${lookback2Days.totalSnow.toFixed(1)}" fresh snow in last 2 days, temps ${lookback2Days.minTemp.toFixed(0)}-${lookback2Days.maxTemp.toFixed(0)}°F`
+                };
             }
+
+            // YELLOW: Snowed in last 5 days AND no thaw in last 5 days
+            if (lookback5Days.hadSnow && !lookback5Days.hadThaw) {
+                return {
+                    color: 'yellow',
+                    summary: `${lookback5Days.totalSnow.toFixed(1)}" snow in last 5 days, stayed below freezing`
+                };
+            }
+
+            // RED: No snow in last 7 days
+            if (!lookback7Days.hadSnow) {
+                return {
+                    color: 'red',
+                    summary: 'No snowfall in last 7 days'
+                };
+            }
+
+            // RED: Less than 0.5" snow since last thaw
+            const snowSinceThaw = calculateSnowSinceLastThaw(timeline, targetIdx);
+            if (snowSinceThaw.total < 0.5) {
+                const dayOfWeek = getDayOfWeek(snowSinceThaw.thawDate);
+                return {
+                    color: 'red',
+                    summary: `Only ${snowSinceThaw.total.toFixed(1)}" since temps hit ${snowSinceThaw.maxTemp.toFixed(0)}°F on ${dayOfWeek}`
+                };
+            }
+
+            // DEFAULT: Yellow (some snow but not enough for green)
+            return {
+                color: 'yellow',
+                summary: `${lookback7Days.totalSnow.toFixed(1)}" snow in last week`
+            };
+        }
+
+        /**
+         * Checks wind speeds for the target day (forecast only)
+         * @returns {Object} { isRed: boolean, summary: string }
+         */
+        function checkWindSpeeds(targetDay) {
+            // Historical days or missing wind data, assume OK
+            if (!targetDay.hourlyWinds || targetDay.hourlyWinds.length < 17) {
+                return { isRed: false, summary: '' };
+            }
+
+            // Check ski hours: 7am-4pm (indices 7-16)
+            const skiHourWinds = targetDay.hourlyWinds.slice(7, 17);
+            const highWindHours = [];
+            let maxWind = 0;
+            let minWind = 999;
+
+            skiHourWinds.forEach((wind, idx) => {
+                if (wind >= 20) {
+                    const hour = 7 + idx;
+                    highWindHours.push(hour);
+                    maxWind = Math.max(maxWind, wind);
+                    minWind = Math.min(minWind, wind);
+                }
+            });
+
+            if (highWindHours.length === 0) {
+                return { isRed: false, summary: '' };
+            }
+
+            // Format hour ranges
+            const ranges = formatHourRanges(highWindHours);
+            const windRange = minWind === maxWind ?
+                `${Math.round(maxWind)} MPH` :
+                `${Math.round(minWind)}-${Math.round(maxWind)} MPH`;
+
+            return {
+                isRed: true,
+                summary: `Winds ${windRange} from ${ranges}`
+            };
+        }
+
+        /**
+         * Analyzes lookback period for snow and thaw
+         * @param {Array} timeline - Full timeline
+         * @param {number} targetIdx - Index of target date
+         * @param {number} daysBack - How many days to look back
+         * @returns {Object} { hadSnow: boolean, hadThaw: boolean, totalSnow: number, minTemp: number, maxTemp: number }
+         */
+        function analyzeLookback(timeline, targetIdx, daysBack) {
+            let totalSnow = 0;
+            let hadThaw = false;
+            let minTemp = 999;
+            let maxTemp = -999;
+
+            // Look back 'daysBack' days, not including target day itself
+            const startIdx = Math.max(0, targetIdx - daysBack);
+
+            for (let i = startIdx; i < targetIdx; i++) {
+                const day = timeline[i];
+                totalSnow += day.dailySnowfall;
+                if (day.hadFreezingTemps) {
+                    hadThaw = true;
+                }
+                minTemp = Math.min(minTemp, day.minTemp);
+                maxTemp = Math.max(maxTemp, day.maxTemp);
+            }
+
+            return {
+                hadSnow: totalSnow > 0,
+                hadThaw: hadThaw,
+                totalSnow: totalSnow,
+                minTemp: minTemp === 999 ? 0 : minTemp,
+                maxTemp: maxTemp === -999 ? 0 : maxTemp
+            };
+        }
+
+        /**
+         * Calculates total snow since the last time temps went above freezing
+         * @returns {Object} { total: number, thawDate: string, maxTemp: number }
+         */
+        function calculateSnowSinceLastThaw(timeline, targetIdx) {
+            let totalSnow = 0;
+            let thawDate = null;
+            let maxTemp = 32;
+
+            // Walk backwards from target date
+            for (let i = targetIdx - 1; i >= 0; i--) {
+                const day = timeline[i];
+
+                // If we hit a thaw day, stop
+                if (day.hadFreezingTemps) {
+                    thawDate = day.date;
+                    maxTemp = day.maxTemp;
+                    break;
+                }
+
+                totalSnow += day.dailySnowfall;
+            }
+
+            return {
+                total: totalSnow,
+                thawDate: thawDate || 'unknown',
+                maxTemp: maxTemp
+            };
+        }
+
+        /**
+         * Formats hour ranges for wind warnings
+         * Example: [10, 11, 12, 14, 15] → "10am-1pm, 2pm-4pm"
+         */
+        function formatHourRanges(hours) {
+            if (hours.length === 0) return '';
+
+            const ranges = [];
+            let rangeStart = hours[0];
+            let rangePrev = hours[0];
+
+            for (let i = 1; i < hours.length; i++) {
+                if (hours[i] !== rangePrev + 1) {
+                    // End of range
+                    ranges.push(formatRange(rangeStart, rangePrev));
+                    rangeStart = hours[i];
+                }
+                rangePrev = hours[i];
+            }
+
+            // Add final range
+            ranges.push(formatRange(rangeStart, rangePrev));
+
+            return ranges.join(', ');
+        }
+
+        function formatRange(start, end) {
+            const formatHour = (h) => {
+                const ampm = h >= 12 ? 'pm' : 'am';
+                const hour12 = h > 12 ? h - 12 : (h === 0 ? 12 : h);
+                return `${hour12}${ampm}`;
+            };
+
+            if (start === end) {
+                return formatHour(start);
+            }
+            return `${formatHour(start)}-${formatHour(end + 1)}`;
+        }
+
+        /**
+         * Converts date string to day of week
+         * @param {string} dateString - Date in YYYY-MM-DD format
+         * @returns {string} Day of week (e.g., "Thursday")
+         */
+        function getDayOfWeek(dateString) {
+            const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            const date = new Date(dateString + 'T12:00:00'); // Add time to avoid timezone issues
+            return days[date.getDay()];
+        }
+
+        /**
+         * Pre-calculates evaluations for today, Saturday, and Sunday
+         * @param {string} resortName - Name of the resort
+         * @param {Object} weatherTimeline - The resort's weather timeline
+         */
+        function cacheEvaluations(resortName, weatherTimeline) {
+            const today = formatDateLocal(new Date());
+            const saturday = getNextSaturday();
+            const sunday = getNextSunday();
+
+            evaluationCache[resortName] = {
+                today: evaluateSkiConditions(weatherTimeline, today),
+                saturday: evaluateSkiConditions(weatherTimeline, saturday),
+                sunday: evaluateSkiConditions(weatherTimeline, sunday)
+            };
         }
 
         // =================================================================
         // MARKER COLOR MAPPING
         // =================================================================
-        function getMarkerColor(condition) {
+        function getMarkerColor(color) {
             const colors = {
-                'good': '#4CAF50',
-                'moderate': '#FFC107',
-                'poor': '#F44336'
+                'good': '#4CAF50',      // Legacy support
+                'moderate': '#FFC107',  // Legacy support
+                'poor': '#F44336',      // Legacy support
+                'green': '#4CAF50',     // NEW system
+                'yellow': '#FFC107',    // NEW system
+                'red': '#F44336'        // NEW system
             };
-            return colors[condition] || '#999999';
+            return colors[color] || '#999999';
         }
 
         // =================================================================
@@ -436,6 +666,77 @@ function getNextSunday() {
         }
 
         // =================================================================
+        // UNIFIED WEATHER DATA FETCHING (NEW SYSTEM)
+        // =================================================================
+        async function fetchExtendedForecast(lat, lng, elevation) {
+            const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&hourly=temperature_2m,windspeed_10m&daily=snowfall_sum&past_days=7&forecast_days=16&elevation=${elevation}&temperature_unit=fahrenheit&windspeed_unit=mph&precipitation_unit=inch`;
+
+            try {
+                const response = await fetch(url);
+                const data = await response.json();
+
+                if (!data.hourly || !data.daily) return null;
+
+                return data;
+            } catch (error) {
+                console.error('Error fetching extended forecast:', error);
+                return null;
+            }
+        }
+
+        function processWeatherData(apiData, resortName) {
+            if (!apiData || !apiData.hourly || !apiData.daily) {
+                return { timeline: [], dateIndex: {} };
+            }
+
+            const timeline = [];
+            const dateIndex = {};
+
+            // Get all dates from the daily data
+            const dates = apiData.daily.time;
+            const dailySnowfall = apiData.daily.snowfall_sum;
+
+            // Get hourly data
+            const hourlyTimes = apiData.hourly.time;
+            const hourlyTemps = apiData.hourly.temperature_2m;
+            const hourlyWinds = apiData.hourly.windspeed_10m;
+
+            // Today's date for determining historical vs forecast
+            const today = formatDateLocal(new Date());
+
+            // Process each day
+            dates.forEach((date, dayIdx) => {
+                // Extract hourly data for this specific day (24 hours)
+                const startHour = dayIdx * 24;
+                const endHour = startHour + 24;
+
+                const dayHourlyTemps = hourlyTemps.slice(startHour, endHour);
+                const dayHourlyWinds = hourlyWinds.slice(startHour, endHour);
+
+                // Check if any hour went above freezing (≥32°F)
+                const hadFreezingTemps = dayHourlyTemps.some(temp => temp >= 32);
+
+                // Determine if historical or forecast
+                const type = date < today ? "historical" : "forecast";
+
+                timeline.push({
+                    date: date,
+                    type: type,
+                    dailySnowfall: dailySnowfall[dayIdx] || 0,
+                    hourlyTemps: dayHourlyTemps,
+                    hourlyWinds: dayHourlyWinds,
+                    maxTemp: Math.max(...dayHourlyTemps),
+                    minTemp: Math.min(...dayHourlyTemps),
+                    hadFreezingTemps: hadFreezingTemps
+                });
+
+                dateIndex[date] = timeline.length - 1;
+            });
+
+            return { timeline, dateIndex };
+        }
+
+        // =================================================================
         // WEATHER CODE INTERPRETATION
         // =================================================================
         function getWeatherDescription(code) {
@@ -471,8 +772,8 @@ function getNextSunday() {
         // =================================================================
         // POPUP CONTENT CREATION
         // =================================================================
-        function createCurrentPopupContent(resort, weather) {
-            if (!weather) {
+        function createCurrentPopupContent(resort, evaluation) {
+            if (!evaluation) {
                 return `
                     <div class="resort-popup">
                         <h3>${resort.name}</h3>
@@ -482,28 +783,88 @@ function getNextSunday() {
                 `;
             }
 
+            // NEW SYSTEM: evaluation is {color, summary}
+            if (evaluation.color && evaluation.summary) {
+                const conditionText = {
+                    'green': 'Excellent',
+                    'yellow': 'Moderate',
+                    'red': 'Poor'
+                }[evaluation.color];
+
+                return `
+                    <div class="resort-popup">
+                        <h3>${resort.name}</h3>
+                        <p><span class="label">Distance from DC:</span> ${resort.distanceFromDC}</p>
+                        <p><span class="label">Conditions:</span> ${conditionText}</p>
+                        <p><span class="label">Why:</span> ${evaluation.summary}</p>
+                        <p><span class="label">Notes:</span> ${resort.notes}</p>
+                        <a href="${resort.webcamSite}" target="_blank" rel="noopener noreferrer">Mountain Cams</a>
+                    </div>
+                `;
+            }
+
+            // LEGACY SYSTEM: evaluation is old weather object
             return `
                 <div class="resort-popup">
                     <h3>${resort.name}</h3>
                     <p><span class="label">Distance from DC:</span> ${resort.distanceFromDC}</p>
-                    <p><span class="label">Temperature:</span> ${weather.temperature}°F</p>
-                    <p><span class="label">Conditions:</span> ${getWeatherDescription(weather.weatherCode)}</p>
-                    <p><span class="label">Wind Speed:</span> ${weather.windSpeed} mph</p>
-                    <p><span class="label">Snowfall (24h):</span> ${weather.snowfall24h} inches</p>
+                    <p><span class="label">Temperature:</span> ${evaluation.temperature}°F</p>
+                    <p><span class="label">Conditions:</span> ${getWeatherDescription(evaluation.weatherCode)}</p>
+                    <p><span class="label">Wind Speed:</span> ${evaluation.windSpeed} mph</p>
+                    <p><span class="label">Snowfall (24h):</span> ${evaluation.snowfall24h} inches</p>
                     <p><span class="label">Notes:</span> ${resort.notes}</p>
                     <a href="${resort.webcamSite}" target="_blank" rel="noopener noreferrer">Mountain Cams</a>
                 </div>
             `;
         }
 
-        function createWeekendPopupContent(resort, weather) {
+        function createWeekendPopupContent(resort, saturdayEval, sundayEval) {
+            // Handle both new system (two separate evaluations) and legacy system (single weather object)
+
+            // NEW SYSTEM: saturdayEval and sundayEval are evaluation objects
+            if (saturdayEval && saturdayEval.color && sundayEval && sundayEval.color) {
+                const satConditionText = {
+                    'green': 'Excellent',
+                    'yellow': 'Moderate',
+                    'red': 'Poor'
+                }[saturdayEval.color];
+
+                const sunConditionText = {
+                    'green': 'Excellent',
+                    'yellow': 'Moderate',
+                    'red': 'Poor'
+                }[sundayEval.color];
+
+                return `
+                    <div class="resort-popup">
+                        <h3>${resort.name}</h3>
+                        <p><span class="label">Distance from DC:</span> ${resort.distanceFromDC}</p>
+                        <p><span class="label">Notes:</span> ${resort.notes}</p>
+                        <a href="${resort.webcamSite}" target="_blank" rel="noopener noreferrer">Mountain Cams</a>
+
+                        <div class="day-section">
+                            <div class="day-title">Saturday</div>
+                            <p><span class="label">Conditions:</span> ${satConditionText}</p>
+                            <p><span class="label">Why:</span> ${saturdayEval.summary}</p>
+                        </div>
+
+                        <div class="day-section">
+                            <div class="day-title">Sunday</div>
+                            <p><span class="label">Conditions:</span> ${sunConditionText}</p>
+                            <p><span class="label">Why:</span> ${sundayEval.summary}</p>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // LEGACY SYSTEM: saturdayEval is actually the old weather object
+            const weather = saturdayEval;
             if (!weather) {
                 return `
                     <div class="resort-popup">
                         <h3>${resort.name}</h3>
                         <p><span class="label">Distance from DC:</span> ${resort.distanceFromDC}</p>
                         <p>Weekend forecast unavailable</p>
-                        
                     </div>
                 `;
             }
@@ -514,7 +875,7 @@ function getNextSunday() {
                     <p><span class="label">Distance from DC:</span> ${resort.distanceFromDC}</p>
                     <p><span class="label">Notes:</span> ${resort.notes}</p>
                     <a href="${resort.webcamSite}" target="_blank" rel="noopener noreferrer">Mountain Cams</a>
-                    
+
                     <div class="day-section">
                         <div class="day-title">Saturday</div>
                         <p><span class="label">Temperature:</span> ${weather.saturday.tempMin}°F - ${weather.saturday.tempMax}°F</p>
@@ -522,7 +883,7 @@ function getNextSunday() {
                         <p><span class="label">Wind Speed:</span> ${weather.saturday.windSpeed} mph</p>
                         <p><span class="label">Expected Snowfall:</span> ${weather.saturday.snowfall.toFixed(1)} inches</p>
                     </div>
-                    
+
                     <div class="day-section">
                         <div class="day-title">Sunday</div>
                         <p><span class="label">Temperature:</span> ${weather.sunday.tempMin}°F - ${weather.sunday.tempMax}°F</p>
@@ -537,22 +898,35 @@ function getNextSunday() {
         // =================================================================
         // SPLIT MARKER CREATION (SVG-based for weekend view)
         // =================================================================
-        function createSplitMarker(resort, weather) {
-            if (!weather) {
-                return createRegularMarker(resort, null);
-            }
+        function createSplitMarker(resort, saturdayEval, sundayEval) {
+            // Handle both NEW system (evaluation objects) and LEGACY system (weather object)
 
-            // CORRECTED: Use high temperature (tempMax) for condition evaluation
-            const satCondition = evaluateSkiConditions({ 
-                temperature: weather.saturday.tempMax, 
-                windSpeed: weather.saturday.windSpeed 
-            });
-            const sunCondition = evaluateSkiConditions({ 
-                temperature: weather.sunday.tempMax, 
-                windSpeed: weather.sunday.windSpeed 
-            });
-            const satColor = getMarkerColor(satCondition);
-            const sunColor = getMarkerColor(sunCondition);
+            let satColor, sunColor;
+
+            // NEW SYSTEM: saturdayEval and sundayEval are evaluation objects with .color
+            if (saturdayEval && saturdayEval.color && sundayEval && sundayEval.color) {
+                satColor = getMarkerColor(saturdayEval.color);
+                sunColor = getMarkerColor(sundayEval.color);
+            }
+            // LEGACY SYSTEM: saturdayEval is actually the old weather object
+            else {
+                const weather = saturdayEval;
+                if (!weather) {
+                    return createRegularMarker(resort, null);
+                }
+
+                // Use old evaluation system
+                const satCondition = evaluateSkiConditions({
+                    temperature: weather.saturday.tempMax,
+                    windSpeed: weather.saturday.windSpeed
+                });
+                const sunCondition = evaluateSkiConditions({
+                    temperature: weather.sunday.tempMax,
+                    windSpeed: weather.sunday.windSpeed
+                });
+                satColor = getMarkerColor(satCondition);
+                sunColor = getMarkerColor(sunCondition);
+            }
 
             // Create custom SVG icon with split colors
             const svgIcon = L.divIcon({
@@ -573,21 +947,36 @@ function getNextSunday() {
                 icon: svgIcon
             }).addTo(map);
 
-            marker.bindPopup(createWeekendPopupContent(resort, weather));
-            
+            marker.bindPopup(createWeekendPopupContent(resort, saturdayEval, sundayEval));
+
             // Store resort name on the marker for easy lookup
             marker.resortName = resort.name;
-            
+
             return marker;
         }
 
         // =================================================================
         // REGULAR MARKER CREATION (for current view)
         // =================================================================
-        function createRegularMarker(resort, weather) {
-            const condition = weather ? evaluateSkiConditions(weather) : 'moderate';
-            const color = getMarkerColor(condition);
-            
+        function createRegularMarker(resort, evaluation) {
+            // Handle both NEW system (evaluation object) and LEGACY system (weather object)
+
+            let color;
+
+            // NEW SYSTEM: evaluation is {color, summary}
+            if (evaluation && evaluation.color) {
+                color = getMarkerColor(evaluation.color);
+            }
+            // LEGACY SYSTEM: evaluation is old weather object
+            else if (evaluation && evaluation.temperature !== undefined) {
+                const condition = evaluateSkiConditions(evaluation);
+                color = getMarkerColor(condition);
+            }
+            // No data
+            else {
+                color = getMarkerColor('moderate');
+            }
+
             const marker = L.circleMarker([resort.lat, resort.lng], {
                 radius: 10,
                 fillColor: color,
@@ -597,11 +986,11 @@ function getNextSunday() {
                 fillOpacity: 0.8
             }).addTo(map);
 
-            marker.bindPopup(createCurrentPopupContent(resort, weather));
-            
+            marker.bindPopup(createCurrentPopupContent(resort, evaluation));
+
             // Store resort name on the marker for easy lookup
             marker.resortName = resort.name;
-            
+
             return marker;
         }
 
@@ -616,13 +1005,13 @@ function getNextSunday() {
                     resortToReopen = marker.resortName;
                 }
             });
-            
+
             currentView = view;
-            
+
             // Update button states
             document.getElementById('currentBtn').classList.toggle('active', view === 'current');
             document.getElementById('weekendBtn').classList.toggle('active', view === 'weekend');
-            
+
             // Update legend note
             const legendNote = document.getElementById('legendNote');
             if (view === 'weekend') {
@@ -630,21 +1019,30 @@ function getNextSunday() {
             } else {
                 legendNote.innerHTML = 'Click markers for details';
             }
-            
+
             // Clear existing markers
             markers.forEach(marker => map.removeLayer(marker));
             markers = [];
-            
+
             // Create new markers based on view
             skiResorts.forEach(resort => {
                 let marker;
                 if (view === 'current') {
-                    marker = createRegularMarker(resort, currentWeatherData[resort.name]);
+                    // NEW SYSTEM: Use cached evaluation if available, otherwise fallback to legacy
+                    const evaluation = evaluationCache[resort.name]?.today || currentWeatherData[resort.name];
+                    marker = createRegularMarker(resort, evaluation);
                 } else {
-                    marker = createSplitMarker(resort, weekendWeatherData[resort.name]);
+                    // NEW SYSTEM: Use cached evaluations if available, otherwise fallback to legacy
+                    if (evaluationCache[resort.name]) {
+                        const saturdayEval = evaluationCache[resort.name].saturday;
+                        const sundayEval = evaluationCache[resort.name].sunday;
+                        marker = createSplitMarker(resort, saturdayEval, sundayEval);
+                    } else {
+                        marker = createSplitMarker(resort, weekendWeatherData[resort.name]);
+                    }
                 }
                 markers.push(marker);
-                
+
                 // Re-open the popup if it was open for this resort
                 if (resortToReopen === resort.name) {
                     // Use requestAnimationFrame to ensure DOM is updated
@@ -661,30 +1059,41 @@ function getNextSunday() {
         async function initializeMap() {
             document.getElementById('loading').style.display = 'block';
 
-            // Fetch both current and weekend data
-            const currentPromises = skiResorts.map(resort => 
-                fetchCurrentWeather(resort.lat, resort.lng, resort.elevation)
-            );
-            
-            const weekendPromises = skiResorts.map(resort => 
-                fetchWeekendForecast(resort.lat, resort.lng, resort.elevation)
-            );
+            // NEW SYSTEM: Fetch extended forecast data for all resorts
+            for (const resort of skiResorts) {
+                try {
+                    const forecastData = await fetchExtendedForecast(
+                        resort.lat, resort.lng, resort.elevation
+                    );
 
-            const [currentResults, weekendResults] = await Promise.all([
-                Promise.all(currentPromises),
-                Promise.all(weekendPromises)
-            ]);
+                    if (forecastData) {
+                        unifiedWeatherData[resort.name] = processWeatherData(
+                            forecastData, resort.name
+                        );
 
-            // Store all weather data
-            skiResorts.forEach((resort, index) => {
-                currentWeatherData[resort.name] = currentResults[index];
-                weekendWeatherData[resort.name] = weekendResults[index];
-            });
+                        cacheEvaluations(resort.name, unifiedWeatherData[resort.name]);
+                    }
 
-            // Create initial markers (current view)
+                    // LEGACY: Keep old data fetching for backwards compatibility during transition
+                    currentWeatherData[resort.name] = await fetchCurrentWeather(resort.lat, resort.lng, resort.elevation);
+                    weekendWeatherData[resort.name] = await fetchWeekendForecast(resort.lat, resort.lng, resort.elevation);
+
+                } catch (error) {
+                    console.error(`Error fetching data for ${resort.name}:`, error);
+                }
+            }
+
+            // Create initial markers (current view) using NEW system
             skiResorts.forEach(resort => {
-                const marker = createRegularMarker(resort, currentWeatherData[resort.name]);
-                markers.push(marker);
+                const evaluation = evaluationCache[resort.name]?.today;
+                if (evaluation) {
+                    const marker = createRegularMarker(resort, evaluation);
+                    markers.push(marker);
+                } else {
+                    // Fallback to old system if new system failed
+                    const marker = createRegularMarker(resort, currentWeatherData[resort.name]);
+                    markers.push(marker);
+                }
             });
 
             document.getElementById('loading').style.display = 'none';
